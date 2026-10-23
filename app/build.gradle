@@ -88,6 +88,8 @@ android {
     lint {
         baseline = file("lint-baseline.xml")
         disable += "MissingTranslation"
+        // PR CI runs the full lint task; keep release packaging fast.
+        checkReleaseBuilds = false
     }
 
     sourceSets {
