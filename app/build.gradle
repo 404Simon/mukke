@@ -4,6 +4,8 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+def eternalJniDir = layout.buildDirectory.dir("generated/eternalJni")
+
 android {
     namespace = 'com.eddyizm.tempus'
     //noinspection GradleDependency
@@ -87,6 +89,36 @@ android {
         baseline = file("lint-baseline.xml")
         disable += "MissingTranslation"
     }
+
+    sourceSets {
+        main {
+            jniLibs.srcDir(eternalJniDir.get().asFile)
+        }
+    }
+}
+
+tasks.register("buildEternalJni", Exec) {
+    group = "build"
+    description = "Builds the Eternal Jukebox JNI libraries for all Android ABIs."
+    workingDir rootProject.projectDir
+    commandLine "bash", "bin/build-eternal-jni.sh"
+    environment "ETERNAL_JNI_OUTPUT_DIR", eternalJniDir.get().asFile.absolutePath
+    inputs.files(fileTree("${rootProject.projectDir}/rust") {
+        include "Cargo.toml"
+        include "Cargo.lock"
+        include "rust-toolchain.toml"
+        include "crates/**/Cargo.toml"
+        include "crates/**/src/**"
+    })
+    inputs.file("${rootProject.projectDir}/bin/build-eternal-jni.sh")
+    outputs.dir(eternalJniDir)
+}
+
+tasks.matching {
+    it.name.startsWith("merge") &&
+        (it.name.endsWith("JniLibFolders") || it.name.endsWith("NativeLibs"))
+}.configureEach {
+    dependsOn("buildEternalJni")
 }
 
 dependencies {

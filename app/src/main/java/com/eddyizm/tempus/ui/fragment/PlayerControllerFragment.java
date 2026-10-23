@@ -37,6 +37,8 @@ import androidx.media3.common.Tracks;
 import androidx.media3.common.util.RepeatModeUtil;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.session.MediaBrowser;
+import androidx.media3.session.SessionCommand;
+import androidx.media3.session.SessionResult;
 import androidx.media3.session.SessionToken;
 import androidx.navigation.NavController;
 import androidx.navigation.NavOptions;
@@ -49,6 +51,8 @@ import androidx.viewpager2.widget.ViewPager2;
 
 import com.eddyizm.tempus.R;
 import com.eddyizm.tempus.databinding.InnerFragmentPlayerControllerBinding;
+import com.eddyizm.tempus.eternal.EternalMode;
+import com.eddyizm.tempus.eternal.EternalModeState;
 import com.eddyizm.tempus.service.MediaService;
 import com.eddyizm.tempus.ui.activity.MainActivity;
 import com.eddyizm.tempus.ui.dialog.PlaybackSpeedDialog;
@@ -60,6 +64,7 @@ import androidx.core.widget.ImageViewCompat;
 import android.content.res.ColorStateList;
 import com.eddyizm.tempus.ui.dialog.RatingDialog;
 import com.eddyizm.tempus.ui.dialog.TrackInfoDialog;
+import com.eddyizm.tempus.ui.components.EternalTimelineView;
 import com.eddyizm.tempus.ui.fragment.pager.PlayerControllerHorizontalPager;
 import com.eddyizm.tempus.util.AssetLinkUtil;
 import com.eddyizm.tempus.util.Constants;
@@ -72,6 +77,8 @@ import com.eddyizm.tempus.util.FavoriteRegistry;
 import com.google.android.material.chip.Chip;
 import com.google.android.material.chip.ChipGroup;
 import com.google.android.material.elevation.SurfaceColors;
+import com.google.common.util.concurrent.FutureCallback;
+import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.MoreExecutors;
 
@@ -109,6 +116,11 @@ public class PlayerControllerFragment extends Fragment {
     private LinearLayout sleepTimerContainer;
     private ImageButton sleepTimerButton;
     private android.widget.TextView sleepTimerLabel;
+    private LinearLayout eternalContainer;
+    private ImageButton eternalButton;
+    private TextView eternalLabel;
+    private EternalTimelineView eternalTimeline;
+    private String lastEternalErrorToast;
     private ChipGroup assetLinkChipGroup;
     private Chip playerSongLinkChip;
     private Chip playerAlbumLinkChip;
@@ -140,6 +152,7 @@ public class PlayerControllerFragment extends Fragment {
         bind.playerRemoteToggle.setOnClickListener(v -> com.eddyizm.tempus.lan.LanDevicePicker.toggle(requireActivity()));
         initOverflowButton();
         initQuickActionView();
+        initEternalMode();
         initCoverLyricsSlideView();
         initMediaListenable();
         initMediaLabelButton();
@@ -171,6 +184,7 @@ public class PlayerControllerFragment extends Fragment {
         if (bind != null) bind.nowPlayingMediaControllerView.setPlayer(null);
         if (remotePlayer != null) remotePlayer.release();
         remotePlayer = null;
+        eternalTimeline = null;
         bind = null;
     }
 
@@ -195,6 +209,8 @@ public class PlayerControllerFragment extends Fragment {
             buttonFavorite.setVisibility(View.VISIBLE);
             var displayedSong = playerBottomSheetViewModel.getLiveMedia().getValue();
             buttonFavorite.setEnabled(displayedSong != null && Objects.equals(displayedSong.getId(), state.getMediaId()));
+            setEternalContainerVisible(false);
+            if (eternalTimeline != null) eternalTimeline.setVisibility(View.GONE);
             renderingRemote = true;
             try {
                 MediaMetadata metadata = com.eddyizm.tempus.lan.LanPlayerAdapter.metadata(com.eddyizm.tempus.lan.LanRemoteSession.currentSong());
@@ -215,6 +231,8 @@ public class PlayerControllerFragment extends Fragment {
                 setMetadata(browser.getMediaMetadata());
                 setMediaInfo(browser.getMediaMetadata());
             }
+            setEternalContainerVisible(browser != null
+                    && Constants.MEDIA_TYPE_MUSIC.equals(mediaTypeOf(browser)));
         }
     }
 
@@ -241,6 +259,10 @@ public class PlayerControllerFragment extends Fragment {
         sleepTimerContainer = bind.getRoot().findViewById(R.id.player_sleep_timer_container);
         sleepTimerButton = bind.getRoot().findViewById(R.id.player_sleep_timer_button);
         sleepTimerLabel = bind.getRoot().findViewById(R.id.player_sleep_timer_label);
+        eternalContainer = bind.getRoot().findViewById(R.id.player_eternal_container);
+        eternalButton = bind.getRoot().findViewById(R.id.player_eternal_button);
+        eternalLabel = bind.getRoot().findViewById(R.id.player_eternal_label);
+        eternalTimeline = bind.getRoot().findViewById(R.id.player_eternal_timeline);
         checkAndSetRatingContainerVisibility();
     }
 
@@ -298,6 +320,125 @@ public class PlayerControllerFragment extends Fragment {
                 playerMediaCoverViewPager.setCurrentItem(0, true);
             }
         });
+    }
+
+    private void initEternalMode() {
+        if (eternalButton != null) {
+            eternalButton.setOnClickListener(view -> toggleEternalMode());
+        }
+
+        // The null checks keep this safe for custom layouts that omit the container.
+        renderEternalState(EternalMode.INSTANCE.getState().getValue());
+        EternalMode.INSTANCE.getState().observe(getViewLifecycleOwner(), this::renderEternalState);
+        EternalMode.INSTANCE.getMap().observe(getViewLifecycleOwner(), map -> {
+            if (eternalTimeline == null) return;
+            if (map == null) {
+                eternalTimeline.clear();
+            } else {
+                eternalTimeline.setMap(map.getBeatCount(), map.getBranches());
+            }
+        });
+        EternalMode.INSTANCE.getFrame().observe(getViewLifecycleOwner(), frame -> {
+            if (eternalTimeline == null || frame == null) return;
+            eternalTimeline.setTelemetry(
+                    frame.getPositionMs(),
+                    frame.getDurationMs(),
+                    frame.getBeat(),
+                    frame.getJumpCount());
+        });
+        EternalMode.INSTANCE.getError().observe(getViewLifecycleOwner(), error -> {
+            if (error == null) {
+                lastEternalErrorToast = null;
+                return;
+            }
+            if (!error.equals(lastEternalErrorToast)) {
+                lastEternalErrorToast = error;
+                Toast.makeText(requireContext(), getString(R.string.player_eternal_failed, error),
+                        Toast.LENGTH_LONG).show();
+            }
+            EternalMode.INSTANCE.clearError();
+        });
+    }
+
+    private void toggleEternalMode() {
+        MediaBrowser mediaBrowser = getBrowser();
+        if (mediaBrowser == null) {
+            Toast.makeText(requireContext(), R.string.player_eternal_unavailable, Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        // The service starts or stops from its own state; both transitions use the same
+        // toggle command.
+        try {
+            ListenableFuture<SessionResult> result = mediaBrowser.sendCustomCommand(
+                    new SessionCommand(Constants.CUSTOM_COMMAND_TOGGLE_ETERNAL, Bundle.EMPTY), Bundle.EMPTY);
+            Futures.addCallback(result, new FutureCallback<SessionResult>() {
+                @Override
+                public void onSuccess(SessionResult sessionResult) {
+                    if (sessionResult.resultCode != SessionResult.RESULT_SUCCESS) {
+                        Log.w(TAG, "Eternal toggle rejected with code " + sessionResult.resultCode);
+                    }
+                }
+
+                @Override
+                public void onFailure(Throwable t) {
+                    Log.e(TAG, "Eternal toggle command failed", t);
+                }
+            }, MoreExecutors.directExecutor());
+        } catch (Exception e) {
+            Log.e(TAG, "Unable to send eternal toggle command", e);
+        }
+    }
+
+    private void renderEternalState(EternalModeState state) {
+        if (eternalButton == null || eternalLabel == null)
+            return;
+
+        boolean preparing = state instanceof EternalModeState.Preparing;
+        boolean playing = state instanceof EternalModeState.Playing;
+
+        eternalButton.setSelected(playing);
+        // Staying enabled while preparing lets the user cancel a long analysis.
+        eternalButton.setEnabled(true);
+        if (eternalTimeline != null) {
+            eternalTimeline.setVisibility(playing ? View.VISIBLE : View.GONE);
+        }
+
+        if (preparing) {
+            eternalLabel.setText(R.string.player_eternal_preparing);
+            eternalLabel.setVisibility(View.VISIBLE);
+        } else if (playing) {
+            eternalLabel.setText(R.string.player_eternal);
+            eternalLabel.setVisibility(View.VISIBLE);
+        } else {
+            eternalLabel.setText("");
+            eternalLabel.setVisibility(View.GONE);
+        }
+
+        // setSelected() alone does not recolor the drawable once the view has been
+        // inflated with an explicit tint, so tint it like the queue/lyrics buttons.
+        int colorAttr = playing
+                ? com.google.android.material.R.attr.colorPrimary
+                : com.google.android.material.R.attr.colorOnSurface;
+        int color = com.google.android.material.color.MaterialColors.getColor(eternalButton, colorAttr);
+        ImageViewCompat.setImageTintList(eternalButton, ColorStateList.valueOf(color));
+
+        eternalButton.setContentDescription(getString(
+                preparing ? R.string.player_eternal_cancel_description
+                        : playing ? R.string.player_eternal_stop_description
+                                : R.string.player_eternal_description));
+    }
+
+    private void setEternalContainerVisible(boolean visible) {
+        if (eternalContainer == null)
+            return;
+        eternalContainer.setVisibility(visible ? View.VISIBLE : View.GONE);
+    }
+
+    private String mediaTypeOf(MediaBrowser mediaBrowser) {
+        if (mediaBrowser == null || mediaBrowser.getMediaMetadata().extras == null)
+            return Constants.MEDIA_TYPE_MUSIC;
+        return mediaBrowser.getMediaMetadata().extras.getString("type", Constants.MEDIA_TYPE_MUSIC);
     }
 
     private void initializeBrowser() {
@@ -744,6 +885,8 @@ public class PlayerControllerFragment extends Fragment {
                     break;
             }
         }
+
+        setEternalContainerVisible(Constants.MEDIA_TYPE_MUSIC.equals(mediaTypeOf(mediaBrowser)));
     }
 
     // -------------------------------------------------------------------------

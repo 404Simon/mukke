@@ -191,7 +191,7 @@
         android:textColor="@color/titleTextColor"
         android:textSize="12sp"
         app:layout_constraintStart_toEndOf="@+id/vertical_guideline"
-        app:layout_constraintTop_toBottomOf="@+id/exo_progress" />
+        app:layout_constraintTop_toBottomOf="@+id/player_eternal_timeline" />
 
     <androidx.media3.ui.DefaultTimeBar
         android:id="@id/exo_progress"
@@ -205,10 +205,22 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toEndOf="@+id/vertical_guideline"
         app:layout_constraintTop_toBottomOf="@+id/player_artist_name_label"
-        app:layout_constraintBottom_toTopOf="@+id/player_play_pause_placeholder_view"
         app:played_color="?attr/colorOnPrimaryContainer"
         app:scrubber_color="?attr/colorOnPrimaryContainer"
         app:unplayed_color="?attr/colorPrimaryContainer" />
+
+    <com.eddyizm.tempus.ui.components.EternalTimelineView
+        android:id="@+id/player_eternal_timeline"
+        android:layout_width="0dp"
+        android:layout_height="44dp"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="6dp"
+        android:layout_marginEnd="16dp"
+        android:visibility="gone"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/exo_progress" />
+
 
     <TextView
         android:id="@+id/exo_duration"
@@ -221,7 +233,7 @@
         android:textColor="@color/titleTextColor"
         android:textSize="12sp"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintTop_toBottomOf="@+id/exo_progress" />
+        app:layout_constraintTop_toBottomOf="@+id/player_eternal_timeline" />
 
     <View
         android:id="@+id/placeholder_view_left"
@@ -250,7 +262,7 @@
         app:layout_constraintBottom_toTopOf="@+id/player_quick_action_view"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toEndOf="@+id/vertical_guideline"
-        app:layout_constraintTop_toBottomOf="@+id/exo_progress"/>
+        app:layout_constraintTop_toBottomOf="@+id/player_eternal_timeline"/>
 
     <View
         android:id="@+id/placeholder_view_middle_right"
@@ -395,7 +407,7 @@
             android:gravity="center_horizontal"
             app:layout_constraintHorizontal_chainStyle="spread"
             app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintEnd_toStartOf="@+id/player_open_lyrics_button"
+            app:layout_constraintEnd_toStartOf="@+id/player_eternal_container"
             app:layout_constraintTop_toTopOf="parent"
             app:layout_constraintBottom_toBottomOf="parent">
 
@@ -417,14 +429,47 @@
 
         </LinearLayout>
 
-        <!-- Lyrics: -->
+        <!-- Eternal: second element of the horizontal spread chain -->
+        <LinearLayout
+            android:id="@+id/player_eternal_container"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:gravity="center_horizontal"
+            android:visibility="gone"
+            app:layout_constraintStart_toEndOf="@+id/player_sleep_timer_container"
+            app:layout_constraintEnd_toStartOf="@+id/player_open_lyrics_button"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintBottom_toBottomOf="parent">
+
+            <ImageButton
+                android:id="@+id/player_eternal_button"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:padding="12dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/player_eternal_description"
+                app:srcCompat="@drawable/ic_eternal"
+                app:tint="?attr/colorPrimary" />
+
+            <TextView
+                android:id="@+id/player_eternal_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textSize="11sp"
+                android:text=""
+                android:visibility="gone" />
+
+        </LinearLayout>
+
+        <!-- Lyrics: third element of the horizontal spread chain -->
         <ImageButton
             android:id="@+id/player_open_lyrics_button"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:padding="16dp"
             android:background="?attr/selectableItemBackgroundBorderless"
-            app:layout_constraintStart_toEndOf="@+id/player_sleep_timer_container"
+            app:layout_constraintStart_toEndOf="@+id/player_eternal_container"
             app:layout_constraintEnd_toStartOf="@+id/player_open_queue_button"
             app:layout_constraintTop_toTopOf="parent"
             app:layout_constraintBottom_toBottomOf="parent"

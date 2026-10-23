@@ -1,0 +1,28 @@
+# Thin Android JNI wrapper for the published eternal-core crate.
+# The engine itself is consumed from crates.io; only this wrapper lives in the app repo.
+[workspace]
+members = [
+    "crates/eternal-jni",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/404Simon/mukke"
+rust-version = "1.89"
+
+[workspace.dependencies]
+symphonia = { version = "0.6", features = ["mp3"] }
+
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.test]
+debug = 1
+
+[profile.test.package."*"]
+debug = false

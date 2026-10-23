@@ -14,6 +14,7 @@ import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
 import androidx.media3.common.Rating
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.common.util.Util
 import androidx.media3.session.CommandButton
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaSession
@@ -246,6 +247,7 @@ open class BaseSessionCallback(
         val sessionCommands =
             MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
                 .add(SessionCommand(Constants.CUSTOM_COMMAND_PLAY_NEXT, Bundle.EMPTY))
+                .add(SessionCommand(Constants.CUSTOM_COMMAND_TOGGLE_ETERNAL, Bundle.EMPTY))
                 .build()
 
         return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
@@ -438,6 +440,11 @@ open class BaseSessionCallback(
         Log.d(TAG, "onCustomCommand: ${customCommand.customAction}")
 
         return when (customCommand.customAction) {
+            Constants.CUSTOM_COMMAND_TOGGLE_ETERNAL -> {
+                Log.d(TAG, "onCustomCommand: toggle eternal mode")
+                service.toggleEternal()
+                Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+            }
             Constants.CUSTOM_COMMAND_INSTANT_MIX_ON -> {
                 if (!MediaManager.continuousPlayIsRunning.get() && Preferences.isInstantMixUsable()) {
                     Log.d(TAG, "onCustomCommand: start onInstantMix")
@@ -518,5 +525,25 @@ open class BaseSessionCallback(
                 .build()
         }
         return Futures.immediateFuture(updatedMediaItems)
+    }
+
+    override fun onSetMediaItems(
+        mediaSession: MediaSession,
+        controller: MediaSession.ControllerInfo,
+        mediaItems: List<MediaItem>,
+        startIndex: Int,
+        startPositionMs: Long
+    ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+        Log.d(TAG, "onSetMediaItems")
+        // A controller is replacing the queue. Leave eternal mode first so the new items are
+        // applied to ExoPlayer and a pending preparation cannot overwrite them afterwards.
+        service.stopEternalIfActive()
+        return Util.transformFutureAsync(
+            onAddMediaItems(mediaSession, controller, mediaItems)
+        ) { resolved ->
+            Futures.immediateFuture(
+                MediaSession.MediaItemsWithStartPosition(resolved, startIndex, startPositionMs)
+            )
+        }
     }
 }

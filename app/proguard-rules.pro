@@ -26,3 +26,7 @@
 
 -keep class **.reflect.TypeToken { *; }
 -keep class * extends **.reflect.TypeToken
+
+# Eternal mode JNI: the native library resolves this class and its static methods by
+# their Java names, so R8 must not rename the class or strip/rename any member.
+-keep class com.eddyizm.tempus.eternal.EternalEngine { *; }

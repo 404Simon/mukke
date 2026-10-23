@@ -201,8 +201,9 @@ Tap the artwork to show four buttons over it, and tap again to hide them.
 3. Adds this track again, followed by songs similar to it, right after the current track (Instant Mix). It uses [getSimilarSongs](https://opensubsonic.netlify.app/docs/endpoints/getsimilarsongs/) of the OpenSubsonic API, so which songs you get depends on your server. For example, Navidrome gets 15 similar artists from Last.fm, then 20 top songs from each.
 4. With **Sync play queue for this user** turned on under Settings → Miscellaneous, saves the play queue. With it off, this button opens the lyrics instead.
 
-Below the playback controls is a row of three buttons.
+Below the playback controls is a row of four buttons.
 
+- **Eternal** turns the current song into an endless, beat-aligned remix. Normal playback continues while the track is analysed, then hands off without a gap. A beat map under the seek bar shows the current beat, possible transitions, recent jumps, and visited beats. Tap again to return to normal playback. Requires local music playback; not available for radio, podcasts, Cast/UPnP, or phone-to-phone remote. Adding to the queue works; removing or reordering is disabled while Eternal runs.
 - **Sleep timer** stops playback after 5 to 60 minutes, after a number of minutes you type in, or at the end of the current track. The volume fades out before playback pauses. While a timer is set, the time left shows under the button, and tapping it again lets you cancel.
 - **Lyrics** slides over to the lyrics. Tap it again or swipe back to return.
 - **Queue** opens the queue.

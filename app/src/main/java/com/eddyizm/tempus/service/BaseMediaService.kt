@@ -39,6 +39,7 @@ import com.eddyizm.tempus.equalizer.ExternalBackend
 import com.eddyizm.tempus.equalizer.DefaultBackend
 import com.eddyizm.tempus.equalizer.ParametricBackend
 import com.eddyizm.tempus.equalizer.ParametricEqAudioProcessor
+import com.eddyizm.tempus.eternal.EternalPlaybackController
 import androidx.mediarouter.media.MediaRouter
 import com.eddyizm.tempus.repository.QueueRepository
 import com.eddyizm.tempus.upnp.UpnpControlPoint
@@ -77,6 +78,7 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
     protected lateinit var exoplayer: ExoPlayer
     protected lateinit var mediaLibrarySession: MediaLibrarySession
     protected var sessionCallback: MediaLibrarySession.Callback? = null
+    private lateinit var eternalPlayback: EternalPlaybackController
     private var upnpRouteProvider: UpnpRouteProvider? = null
     private var upnpPlayer: UpnpPlayer? = null
     private lateinit var bitmapLoader: SyncBitmapLoader
@@ -154,12 +156,20 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
         // to the main thread via widgetUpdateHandler. The guard i < player.mediaItemCount protects
         // against queue changes during the background computation.
 
-        val current = player.currentMediaItemIndex
+        // During eternal mode the session player is a frozen snapshot. Keep the real ExoPlayer
+        // queue fresh instead, so leaving eternal mode picks up the new network's URLs.
+        val target = if (::eternalPlayback.isInitialized && eternalPlayback.isEternalPlayer(player)) {
+            exoplayer
+        } else {
+            player
+        }
+
+        val current = target.currentMediaItemIndex
         if (current == C.INDEX_UNSET) return
 
         // read all items
-        val itemsToProcess = (current + 1 until player.mediaItemCount).map { i ->
-            Pair(i, player.getMediaItemAt(i))
+        val itemsToProcess = (current + 1 until target.mediaItemCount).map { i ->
+            Pair(i, target.getMediaItemAt(i))
         }
         if (itemsToProcess.isEmpty()) return
 
@@ -182,10 +192,10 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
                     // thread, so this post can land after onDestroy released the player.
                     if (serviceDestroyed) return@post
                     updates.forEach { (i, mapped) ->
-                        if (i > player.currentMediaItemIndex
-                            && i < player.mediaItemCount
-                            && player.getMediaItemAt(i).mediaId == mapped.mediaId) {
-                            player.replaceMediaItem(i, mapped)
+                        if (i > target.currentMediaItemIndex
+                            && i < target.mediaItemCount
+                            && target.getMediaItemAt(i).mediaId == mapped.mediaId) {
+                            target.replaceMediaItem(i, mapped)
                         }
                     }
                 }
@@ -346,6 +356,9 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 Log.d(TAG, "onMediaItemTransition" + player.currentMediaItemIndex)
+                if (::eternalPlayback.isInitialized) {
+                    eternalPlayback.onMediaItemChanged(mediaItem?.mediaId)
+                }
                 if (mediaItem == null) return
                 ReplayGainUtil.applyGain(player, mediaItem)
 
@@ -690,6 +703,11 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
     }
 
     open fun onInstantMix(session: MediaSession, onComplete: Runnable? = null) {
+        // Instant Mix edits the queue through the session player. Leave eternal mode first so
+        // those edits hit the real ExoPlayer queue instead of the frozen eternal snapshot.
+        if (::eternalPlayback.isInitialized && eternalPlayback.isEternalPlayer(session.player)) {
+            eternalPlayback.stopAndRestore(play = eternalPlayback.playIntent())
+        }
         val player = session.player
         val currentMediaItem = player.currentMediaItem
         val currentIndex = player.currentMediaItemIndex
@@ -707,19 +725,85 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
     }
 
     fun setPlayer(oldPlayer: Player?, newPlayer: Player) {
-        if (oldPlayer === newPlayer) return
-        if (oldPlayer != null) {
-            val currentQueue = getQueueFromPlayer(oldPlayer)
-            val currentIndex = oldPlayer.currentMediaItemIndex
-            val currentPosition = oldPlayer.currentPosition
-            val isPlaying = oldPlayer.playWhenReady
-            oldPlayer.stop()
+        val previousSessionPlayer = mediaLibrarySession.player
+        val eternalActive = ::eternalPlayback.isInitialized &&
+                eternalPlayback.isActive() &&
+                !eternalPlayback.isEternalPlayer(newPlayer)
+
+        // Read the eternal walk before tearing it down: it is the position the user is hearing,
+        // while the paused ExoPlayer still sits where eternal mode was started.
+        val eternalIndex = if (eternalActive) previousSessionPlayer.currentMediaItemIndex else C.INDEX_UNSET
+        val eternalPosition = if (eternalActive) previousSessionPlayer.currentPosition else C.TIME_UNSET
+        val eternalPlaying = eternalActive && eternalPlayback.playIntent()
+
+        if (eternalActive) {
+            if (newPlayer === exoplayer) {
+                // Local playback is coming back: restore in place instead of copying the queue
+                // onto the same ExoPlayer instance. Keep whatever play/pause state the user
+                // chose during eternal mode.
+                eternalPlayback.stopAndRestore(play = eternalPlaying)
+                return
+            }
+            // Cast/UPnP is taking over. Stop eternal output first so it cannot keep playing with
+            // nothing left to control it, and leave the queue untouched on the local player.
+            eternalPlayback.stopWithoutRestore()
+            previousSessionPlayer.pause()
+        }
+
+        if (!eternalActive && oldPlayer === newPlayer) return
+        val queuePlayer = if (eternalActive) exoplayer else oldPlayer
+        if (queuePlayer != null) {
+            val currentQueue = getQueueFromPlayer(queuePlayer)
+            val currentIndex = if (eternalIndex != C.INDEX_UNSET) {
+                eternalIndex
+            } else {
+                queuePlayer.currentMediaItemIndex
+            }
+            val currentPosition =
+                if (eternalPosition != C.TIME_UNSET) eternalPosition else queuePlayer.currentPosition
+            val isPlaying = if (eternalActive) eternalPlaying else queuePlayer.playWhenReady
+            queuePlayer.stop()
             newPlayer.setMediaItems(currentQueue, currentIndex, currentPosition)
             newPlayer.playWhenReady = isPlaying
             newPlayer.prepare()
         }
         mediaLibrarySession.player = newPlayer
-        (sessionCallback as? BaseSessionCallback)?.handlePlayerChanged(oldPlayer, newPlayer)
+        (sessionCallback as? BaseSessionCallback)?.handlePlayerChanged(
+            if (eternalActive) previousSessionPlayer else oldPlayer,
+            newPlayer,
+        )
+    }
+
+    /**
+     * Swaps the session player without moving the queue or stopping the old player. Used by
+     * eternal mode, whose player already carries its own frozen queue snapshot.
+     */
+    fun installSessionPlayer(newPlayer: Player) {
+        val old = mediaLibrarySession.player
+        if (old === newPlayer) return
+
+        // Move the session first so the old player is never released while it is still the one
+        // controllers and the notification are reading.
+        mediaLibrarySession.player = newPlayer
+        if (::eternalPlayback.isInitialized && !eternalPlayback.isEternalPlayer(newPlayer)) {
+            // Another player is taking over the session: stop eternal output without restoring.
+            eternalPlayback.onSessionPlayerReplaced(newPlayer)
+        }
+        (sessionCallback as? BaseSessionCallback)?.handlePlayerChanged(old, newPlayer)
+    }
+
+    fun toggleEternal() {
+        if (::eternalPlayback.isInitialized) eternalPlayback.toggle()
+    }
+
+    /**
+     * Leaves eternal mode if active, without resuming local playback. Called before a controller
+     * replaces the queue, so the new items land on ExoPlayer instead of the frozen eternal player.
+     */
+    fun stopEternalIfActive() {
+        if (::eternalPlayback.isInitialized && eternalPlayback.isActive()) {
+            eternalPlayback.stopAndRestore(play = false)
+        }
     }
 
     /** Offers renderers as routes and moves playback onto one through [setPlayer], as Cast does. */
@@ -809,6 +893,14 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
     override fun onCreate() {
         super.onCreate()
 
+        eternalPlayback = EternalPlaybackController(
+            this,
+            Handler(Looper.getMainLooper()),
+            Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "eternal-prepare").apply { isDaemon = true }
+            },
+        )
+
         playerInitHook()
         initializeEqualizer()
         initializeNetworkListener()
@@ -824,6 +916,8 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
     override fun onDestroy() {
         QueuePreloader.cancel()
         serviceDestroyed = true
+        // Stop eternal output before the ExoPlayer/audio session it borrows is released.
+        if (::eternalPlayback.isInitialized) eternalPlayback.release()
         // Process scoped, so it outlives the service unless it is cleared here.
         MediaServiceExtensionRegistry.handler = null
         FavoriteRegistry.onChange = null
@@ -1187,10 +1281,18 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
 
             widgetUpdateHandler.post {
                 if (serviceDestroyed) return@post
-                if (resolvable) updateMediaItems(mediaLibrarySession.player)
+                // The session player can be the frozen eternal snapshot; queue maintenance must
+                // always target the real local queue.
+                val target = if (::eternalPlayback.isInitialized &&
+                    eternalPlayback.isEternalPlayer(mediaLibrarySession.player)) {
+                    exoplayer
+                } else {
+                    mediaLibrarySession.player
+                }
+                if (resolvable) updateMediaItems(target)
                 // preload() evaluates the network itself, and runs on every transport change,
                 // including one the queue is not resolved against, since it gates on metered.
-                QueuePreloader.preload(this@BaseMediaService, mediaLibrarySession.player)
+                QueuePreloader.preload(this@BaseMediaService, target)
             }
         }
     }

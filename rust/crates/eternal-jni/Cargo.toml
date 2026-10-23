@@ -1,0 +1,35 @@
+[package]
+name = "eternal-jni"
+description = "JNI bindings for the Eternal Jukebox playback engine"
+# Internal-only crate shipped inside the Tempus Android app: never released.
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+eternal-core = "1.1.0"
+jni = "0.21"
+# Feature unification with eternal-core's symphonia dependency enables AAC,
+# ALAC and MP4/M4A decoding on top of the workspace's default set.
+symphonia = { workspace = true, features = ["aac", "isomp4", "alac"] }
+
+# The JNI entry points are the unsafe FFI boundary for this crate.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+similar_names = "allow"

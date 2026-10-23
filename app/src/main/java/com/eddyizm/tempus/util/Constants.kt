@@ -149,6 +149,9 @@ object Constants {
     const val PLAY_NEXT_COUNT = "play_next_count"
     const val PLAY_NEXT_TARGET_COUNT = "play_next_target_count"
 
+    // Toggles the endless, beat-aligned Eternal Jukebox remix of the current music track.
+    const val CUSTOM_COMMAND_TOGGLE_ETERNAL = "TOGGLE_ETERNAL"
+
     enum class SeedType {
         ARTIST, ALBUM, TRACK
     }

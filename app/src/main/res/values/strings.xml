@@ -813,6 +813,22 @@
         <item>@string/sleep_timer_end_of_track_label</item>
         <item>Custom\u2026</item>
     </string-array>
+    <!-- Eternal mode -->
+    <string name="player_eternal">Eternal</string>
+    <string name="player_eternal_preparing">Preparing…</string>
+    <string name="player_eternal_description">Make this song play forever</string>
+    <string name="player_eternal_stop_description">Stop eternal playback</string>
+    <string name="player_eternal_cancel_description">Cancel eternal preparation</string>
+    <string name="player_eternal_unavailable">Eternal mode needs local music playback</string>
+    <string name="player_eternal_failed">Eternal mode could not start: %1$s</string>
+    <string name="player_eternal_beat">Beat %1$d / %2$d</string>
+    <string name="player_eternal_time_jumps">%1$s · %2$s</string>
+    <string name="player_eternal_map_description">Eternal beat map: beat %1$d of %2$d, %3$s of %4$s, %5$s</string>
+    <plurals name="player_eternal_jumps">
+        <item quantity="one">%1$d jump</item>
+        <item quantity="other">%1$d jumps</item>
+    </plurals>
+
     <string name="customactivityoncrash_error_activity_error_occurred_explanation">Tempus crashed.</string>
     <string name="playlist_error_not_found_title">Playlist not found</string>
     <string name="playlist_error_not_found_message">This playlist could not be found on the server. It will be removed from your local cache.</string>

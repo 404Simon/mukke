@@ -73,6 +73,7 @@ Please note the two variants in the release assets include release/debug and 32/
 - **Podcasts**: If your Subsonic server supports it, listen to podcasts directly within Tempus, expanding your audio entertainment options.
 - **Radio**: Tempus can now also search and save Internet radio stations on local device even without a backend subsonic api support. 
 - **Instant Mix**: Full refactor of instant mix function which leverages subsonics similarSongs2 by artist/album and similarSongs endpoints to server a larger play queue more reliably.
+- **Eternal Jukebox**: Turn a song into a beat-aligned endless remix, analysed and rendered on the device. Playback, notification and headset controls stay inside the normal Tempus media session, and a live beat map shows the current position, possible transitions and the jumps already taken.
 - **Transcoding Support**: Activate transcoding of tracks on your Subsonic server, allowing you to set a transcoding profile for optimized streaming directly from the app. This feature requires support from your Subsonic server.
 - **Multiple Libraries**: Tempus handles multi-library setups gracefully. They are displayed as Library folders.
 - **Equalizer**: Option to use built-in or third-party equalizer.
@@ -150,6 +151,10 @@ Not a hard requirement but any new feature/change should ideally include an upda
 
 and everyone else who has helped move the fork forward with comments, feedback, testing and of course 
 ❤️ [contributors](https://github.com/eddyizm/tempus/graphs/contributors) ❤️
+
+### Eternal Jukebox engine
+
+The thin JNI wrapper lives in [`rust/`](rust/); the engine is the published [`eternal-core`](https://crates.io/crates/eternal-core) crate. Gradle builds the native libraries automatically when packaging (requires Rust, `cargo-ndk`, and the NDK). See [`rust/README.md`](rust/README.md).
 
 ## Donate
 
