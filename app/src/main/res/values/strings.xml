@@ -823,8 +823,6 @@
         <item>Custom\u2026</item>
     </string-array>
     <!-- Eternal mode -->
-    <string name="player_eternal">Eternal</string>
-    <string name="player_eternal_preparing">Preparing…</string>
     <string name="player_eternal_description">Make this song play forever</string>
     <string name="player_eternal_stop_description">Stop eternal playback</string>
     <string name="player_eternal_cancel_description">Cancel eternal preparation</string>

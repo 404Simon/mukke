@@ -467,14 +467,6 @@
                 app:srcCompat="@drawable/ic_eternal"
                 app:tint="?attr/colorPrimary" />
 
-            <TextView
-                android:id="@+id/player_eternal_label"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:textSize="11sp"
-                android:text=""
-                android:visibility="gone" />
-
         </LinearLayout>
 
         <!-- Lyrics: third element of the horizontal spread chain -->

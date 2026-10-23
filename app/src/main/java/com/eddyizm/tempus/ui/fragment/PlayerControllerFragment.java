@@ -15,6 +15,7 @@ import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.animation.AccelerateDecelerateInterpolator;
+import android.view.animation.LinearInterpolator;
 import android.widget.Button;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
@@ -22,6 +23,10 @@ import android.widget.RatingBar;
 import android.widget.TextView;
 import android.widget.ToggleButton;
 import android.widget.Toast;
+
+import android.animation.AnimatorSet;
+import android.animation.ObjectAnimator;
+import android.animation.ValueAnimator;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.widget.PopupMenu;
@@ -118,7 +123,7 @@ public class PlayerControllerFragment extends Fragment {
     private android.widget.TextView sleepTimerLabel;
     private LinearLayout eternalContainer;
     private ImageButton eternalButton;
-    private TextView eternalLabel;
+    private AnimatorSet eternalPreparingAnimator;
     private EternalTimelineView eternalTimeline;
     private String lastEternalErrorToast;
     private ChipGroup assetLinkChipGroup;
@@ -184,6 +189,8 @@ public class PlayerControllerFragment extends Fragment {
         if (bind != null) bind.nowPlayingMediaControllerView.setPlayer(null);
         if (remotePlayer != null) remotePlayer.release();
         remotePlayer = null;
+        stopEternalPreparingAnimation();
+        eternalPreparingAnimator = null;
         eternalTimeline = null;
         bind = null;
     }
@@ -261,7 +268,6 @@ public class PlayerControllerFragment extends Fragment {
         sleepTimerLabel = bind.getRoot().findViewById(R.id.player_sleep_timer_label);
         eternalContainer = bind.getRoot().findViewById(R.id.player_eternal_container);
         eternalButton = bind.getRoot().findViewById(R.id.player_eternal_button);
-        eternalLabel = bind.getRoot().findViewById(R.id.player_eternal_label);
         eternalTimeline = bind.getRoot().findViewById(R.id.player_eternal_timeline);
         checkAndSetRatingContainerVisibility();
     }
@@ -391,7 +397,7 @@ public class PlayerControllerFragment extends Fragment {
     }
 
     private void renderEternalState(EternalModeState state) {
-        if (eternalButton == null || eternalLabel == null)
+        if (eternalButton == null)
             return;
 
         boolean preparing = state instanceof EternalModeState.Preparing;
@@ -404,16 +410,7 @@ public class PlayerControllerFragment extends Fragment {
             eternalTimeline.setVisibility(playing ? View.VISIBLE : View.GONE);
         }
 
-        if (preparing) {
-            eternalLabel.setText(R.string.player_eternal_preparing);
-            eternalLabel.setVisibility(View.VISIBLE);
-        } else if (playing) {
-            eternalLabel.setText(R.string.player_eternal);
-            eternalLabel.setVisibility(View.VISIBLE);
-        } else {
-            eternalLabel.setText("");
-            eternalLabel.setVisibility(View.GONE);
-        }
+        updateEternalPreparingAnimation(preparing);
 
         // setSelected() alone does not recolor the drawable once the view has been
         // inflated with an explicit tint, so tint it like the queue/lyrics buttons.
@@ -429,10 +426,59 @@ public class PlayerControllerFragment extends Fragment {
                                 : R.string.player_eternal_description));
     }
 
+    private void updateEternalPreparingAnimation(boolean preparing) {
+        if (eternalButton == null)
+            return;
+
+        if (!preparing) {
+            stopEternalPreparingAnimation();
+            return;
+        }
+
+        if (eternalPreparingAnimator == null) {
+            ObjectAnimator spin = ObjectAnimator.ofFloat(eternalButton, View.ROTATION, 0f, 360f);
+            spin.setDuration(1000L);
+            spin.setInterpolator(new LinearInterpolator());
+            spin.setRepeatCount(ValueAnimator.INFINITE);
+
+            ObjectAnimator breatheX = ObjectAnimator.ofFloat(eternalButton, View.SCALE_X, 1f, 0.86f);
+            ObjectAnimator breatheY = ObjectAnimator.ofFloat(eternalButton, View.SCALE_Y, 1f, 0.86f);
+            for (ObjectAnimator breathe : new ObjectAnimator[] { breatheX, breatheY }) {
+                breathe.setDuration(500L);
+                breathe.setRepeatCount(ValueAnimator.INFINITE);
+                breathe.setRepeatMode(ValueAnimator.REVERSE);
+                breathe.setInterpolator(new AccelerateDecelerateInterpolator());
+            }
+
+            eternalPreparingAnimator = new AnimatorSet();
+            eternalPreparingAnimator.playTogether(spin, breatheX, breatheY);
+        }
+
+        if (!eternalPreparingAnimator.isRunning()) {
+            eternalPreparingAnimator.start();
+        }
+    }
+
+    private void stopEternalPreparingAnimation() {
+        if (eternalPreparingAnimator != null && eternalPreparingAnimator.isRunning()) {
+            eternalPreparingAnimator.cancel();
+        }
+        if (eternalButton != null) {
+            eternalButton.setRotation(0f);
+            eternalButton.setScaleX(1f);
+            eternalButton.setScaleY(1f);
+        }
+    }
+
     private void setEternalContainerVisible(boolean visible) {
         if (eternalContainer == null)
             return;
         eternalContainer.setVisibility(visible ? View.VISIBLE : View.GONE);
+        if (visible) {
+            renderEternalState(EternalMode.INSTANCE.getState().getValue());
+        } else {
+            stopEternalPreparingAnimation();
+        }
     }
 
     private String mediaTypeOf(MediaBrowser mediaBrowser) {
