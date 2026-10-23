@@ -234,6 +234,24 @@
             android:summary="@string/settings_continuous_play_summary"
             android:key="continuous_play" />
 
+        <SwitchPreference
+            android:title="@string/settings_crossfade_title"
+            android:defaultValue="false"
+            android:summary="@string/settings_crossfade_summary"
+            android:key="crossfade_enabled" />
+
+        <SeekBarPreference
+            android:defaultValue="5"
+            android:key="crossfade_duration"
+            android:title="@string/settings_crossfade_duration_title"
+            android:summary="@string/settings_crossfade_duration_summary"
+            android:max="12"
+            app:min="1"
+            app:seekBarIncrement="1"
+            app:showSeekBarValue="false"
+            app:adjustable="true"
+            android:dependency="crossfade_enabled" />
+
         <SeekBarPreference
             android:defaultValue="30"
             android:key="number_tracks_keep_in_queue"

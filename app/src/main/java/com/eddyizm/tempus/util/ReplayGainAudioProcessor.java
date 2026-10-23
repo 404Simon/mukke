@@ -80,6 +80,17 @@ public final class ReplayGainAudioProcessor extends BaseAudioProcessor {
         Log.d(TAG, "setGainImmediate: " + gainDb + " dB -> linear=" + linear);
     }
 
+    /**
+     * Returns the gain currently targeted by this processor in dB.
+     *
+     * <p>Used during a crossfade hand-off so the incoming player can be
+     * crossfaded from (or verified against) the outgoing player's gain
+     * without reaching into the active singleton.
+     */
+    public float getTargetGainDb() {
+        return linearToDb(targetGainLinear);
+    }
+
     public void clearPendingGain() {
         hasPendingFlushGain = false;
     }
@@ -249,5 +260,13 @@ public final class ReplayGainAudioProcessor extends BaseAudioProcessor {
     private static float dbToLinear(float db) {
         db = Math.max(-60f, Math.min(15f, db));
         return (float) Math.pow(10.0, db / 20.0);
+    }
+
+    private static float linearToDb(float linear) {
+        // A zero/negative linear gain has no meaningful dB value; clamp it to
+        // the same floor used by dbToLinear so callers get a finite number.
+        if (!(linear > 0f)) return -60f;
+        float db = (float) (20.0 * Math.log10(linear));
+        return Math.max(-60f, Math.min(15f, db));
     }
 }

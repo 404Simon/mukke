@@ -16,6 +16,7 @@
     - [Library View](#library-view)
     - [Folder or index playback](#folder-or-index-playback)
     - [Now Playing Screen](#now-playing-screen)
+    - [Crossfade](#crossfade)
     - [Podcasts](#podcasts)
     - [Radio Stations](#radio-stations)
     - [Downloads](#downloads)
@@ -221,6 +222,12 @@ The ⋮ menu next to the heart has **Play on…** and **Add to playlist**, plus 
 The player's format and bitrate label gives what was actually decoded, not the transcode Tempus asked for. If your server ignored the request, or had no rule matching the track, the label shows what it really sent. A track the server did transcode reads as the new format followed by "(Transcoding)".
 
 Downloaded tracks show the format on disk. When Tempus transcodes a download, the row and the track info dialog carry the transcoded format and bitrate instead of the source values.
+
+### Crossfade
+
+Turn on **Crossfade** under **Settings → Players** to blend the end of a song into the start of the next one. The duration slider sets the overlap from 1 to 12 seconds. Changes apply immediately, without restarting playback or reloading the queue.
+
+Crossfade is for music played on the phone. It does not apply to radio, podcasts, or playback sent to Cast, UPnP or another phone. When a sleep timer is running, the sleep timer takes precedence: playback fades out and pauses as the timer ends instead of crossing into the next song.
 
 ### Podcasts  
 If your server supports it - add a podcast rss feed

@@ -17,9 +17,15 @@ import java.util.concurrent.CancellationException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.cos
+import kotlin.math.sin
 import kotlin.random.Random
 
 private const val TAG = "EternalPlayback"
+private const val EXIT_FADE_STEPS = 12
+private const val EXIT_FADE_STEP_MS = 15L
+private const val EXIT_PREPARE_TIMEOUT_MS = 4_000L
+private const val EXIT_PREPARE_POLL_MS = 25L
 
 /**
  * Owns the one eternal session and bridges it to the service's [androidx.media3.session.MediaSession].
@@ -62,6 +68,8 @@ class EternalPlaybackController(
     private var eternalPlayer: EternalPlayer? = null
     private var audioOutput: EternalAudioOutput? = null
     private var engine: EternalEngine? = null
+    private var exitFade: Runnable? = null
+    private var restoring = false
 
     // Snapshot of the state to put the local player back into when eternal mode ends.
     private var restorePlayWhenReady = false
@@ -177,6 +185,8 @@ class EternalPlaybackController(
     fun release() {
         if (released) return
         released = true
+        exitFade?.let { mainHandler.removeCallbacks(it) }
+        exitFade = null
         generation++
         prepareCancelled?.set(true)
         prepareCancelled = null
@@ -201,7 +211,7 @@ class EternalPlaybackController(
     // ─────────────────────────────────────────────────────────────
 
     private fun startFromCurrent() {
-        if (released || phase != Phase.INACTIVE) return
+        if (released || restoring || phase != Phase.INACTIVE) return
 
         // LAN remote playback is driven by a separate controller; starting a local eternal
         // walk here would play over the renderer.
@@ -240,6 +250,10 @@ class EternalPlaybackController(
             reportError("Nothing is playing")
             return
         }
+
+        // Eternal snapshots the live player during analysis. Stop any crossfade work so the
+        // player it captured is still the same one when the engine is ready.
+        service.onEternalPreparationStarted()
 
         // Normal playback keeps running throughout analysis. The switch position is read when
         // the engine is ready, not here, so the listener never hears a silent gap.
@@ -379,6 +393,7 @@ class EternalPlaybackController(
             generation++
             prepareCancelled = null
             phase = Phase.INACTIVE
+            service.onEternalPreparationEnded()
             EternalMode.post(EternalModeState.Inactive)
             Log.d(TAG, "Discarding eternal preparation; playback moved on")
             return
@@ -488,6 +503,7 @@ class EternalPlaybackController(
             phase = Phase.INACTIVE
             exoPlayer?.let { service.installSessionPlayer(it) }
             teardownEternal()
+            service.onEternalPreparationEnded()
             EternalMode.post(EternalModeState.Inactive)
             EternalMode.reportError(t.message ?: "Could not start eternal mode")
             if (pausedForSwitch) {
@@ -528,11 +544,11 @@ class EternalPlaybackController(
         // Keep the level the user chose during eternal mode when normal playback resumes.
         val eternalVolume = eternalPlayer?.volume
 
-        // Move the session back to the paused ExoPlayer before releasing the eternal player, so
-        // the session and notification never point at a released player.
         phase = Phase.INACTIVE
-        exoPlayer?.let { service.installSessionPlayer(it) }
-        teardownEternal()
+        restoring = true
+        // restoreExoOnMain prepares the local player while the eternal output is still
+        // audible, then hands the session over and crossfades out of Eternal. Do not tear the
+        // eternal player down before that, or the hand-off leaves a silent gap.
         restoreExoOnMain(index, targetPosition, play, eternalVolume)
         EternalMode.post(EternalModeState.Inactive)
         Log.d(TAG, "Eternal mode stopped at index $index, ${targetPosition}ms, play=$play")
@@ -547,6 +563,7 @@ class EternalPlaybackController(
         if (phase != Phase.PREPARING) return
 
         phase = Phase.INACTIVE
+        service.onEternalPreparationEnded()
         EternalMode.post(EternalModeState.Inactive)
 
         // Normal playback was never paused by preparation, so there is nothing to restore.
@@ -562,6 +579,7 @@ class EternalPlaybackController(
 
         teardownEternal()
         phase = Phase.INACTIVE
+        service.onEternalPreparationEnded()
         EternalMode.post(EternalModeState.Inactive)
         EternalMode.reportError(message)
         Log.w(TAG, "Eternal mode failed: $message")
@@ -588,30 +606,146 @@ class EternalPlaybackController(
         play: Boolean,
         volume: Float? = null,
     ) {
-        val exo = exoPlayer
-        if (exo == null) {
+        val exo = exoPlayer ?: run {
+            restoring = false
+            teardownEternal()
             EternalMode.post(EternalModeState.Inactive)
             return
         }
+        val output = audioOutput
 
         val safeIndex = if (index in 0 until exo.mediaItemCount) {
             index
         } else {
             exo.currentMediaItemIndex
         }
+        val targetVolume = (volume ?: exo.volume).coerceIn(0f, 1f)
+        val eternalOutput = output
+        val canBlend = play && eternalOutput != null && eternalPlayer?.playWhenReady == true
 
-        // Put the local player back in the session before moving it, so controllers never see a
-        // released eternal player as the session player.
-        service.installSessionPlayer(exo)
-
+        // Prepare the local player silently while Eternal keeps playing. This is the same idea
+        // as the entry hand-off: the outgoing audio is never stopped before the incoming one is
+        // ready. Playback at zero volume does not produce an audible gap.
         if (safeIndex != C.INDEX_UNSET) {
             exo.seekTo(safeIndex, positionMs.coerceAtLeast(0L))
         }
-        if (volume != null) exo.volume = volume.coerceIn(0f, 1f)
+        exo.volume = if (canBlend) 0f else targetVolume
         exo.prepare()
-        // `play` is the caller's current intent. The state the track was in before eternal mode
-        // is only used by the preparation failure paths, not to override a later user choice.
         exo.playWhenReady = play
+
+        if (!canBlend) {
+            // Nothing audible to blend with: switch silently and keep the target level.
+            service.installSessionPlayer(exo)
+            teardownEternal()
+            exo.volume = targetVolume
+            service.onEternalPreparationEnded()
+            restoring = false
+            EternalMode.post(EternalModeState.Inactive)
+            return
+        }
+        val outputToFade = requireNotNull(eternalOutput)
+
+        awaitExoPlaying(exo, EXIT_PREPARE_TIMEOUT_MS) { ready ->
+            if (released) return@awaitExoPlaying
+            if (!restoreStillOwnsSession()) {
+                // Cast/UPnP or another queue took the session while we prepared.
+                exo.playWhenReady = false
+                teardownEternal()
+                restoring = false
+                return@awaitExoPlaying
+            }
+            val eternalStillPlaying = eternalPlayer?.playWhenReady == true
+            if (!ready || !eternalStillPlaying) {
+                // Could not get normal playback ready, or the user paused Eternal while we
+                // prepared. Switch silently and honour the current play/pause intent.
+                service.installSessionPlayer(exo)
+                teardownEternal()
+                exo.volume = targetVolume
+                exo.playWhenReady = play && eternalStillPlaying
+                service.onEternalPreparationEnded()
+                restoring = false
+                EternalMode.post(EternalModeState.Inactive)
+                return@awaitExoPlaying
+            }
+
+            service.installSessionPlayer(exo)
+            // Keep crossfade scheduling out of the exit blend; it resumes when the fade ends.
+            service.onEternalPreparationStarted()
+
+            val eternalStartVolume = output.volume.coerceIn(0f, 1f)
+            val fade = object : Runnable {
+                private var step = 0
+
+                override fun run() {
+                    if (released) return
+                    if (service.livePlayer() !== exo) {
+                        // Another session took over mid-blend; never steal it back.
+                        exitFade = null
+                        exo.playWhenReady = false
+                        teardownEternal()
+                        restoring = false
+                        return
+                    }
+                    if (!exo.playWhenReady) {
+                        // Paused during the short blend: stop the eternal output immediately.
+                        exitFade = null
+                        teardownEternal()
+                        exo.volume = targetVolume
+                        service.onEternalPreparationEnded()
+                        restoring = false
+                        EternalMode.post(EternalModeState.Inactive)
+                        return
+                    }
+                    step++
+                    val progress = (step.toFloat() / EXIT_FADE_STEPS).coerceIn(0f, 1f)
+                    val incoming = sin(progress * (Math.PI / 2)).toFloat()
+                    val outgoing = cos(progress * (Math.PI / 2)).toFloat()
+                    exo.volume = targetVolume * incoming
+                    output.volume = eternalStartVolume * outgoing
+                    if (step < EXIT_FADE_STEPS) {
+                        mainHandler.postDelayed(this, EXIT_FADE_STEP_MS)
+                    } else {
+                        exitFade = null
+                        teardownEternal()
+                        exo.volume = targetVolume
+                        service.onEternalPreparationEnded()
+                        restoring = false
+                        EternalMode.post(EternalModeState.Inactive)
+                    }
+                }
+            }
+            exitFade = fade
+            mainHandler.postDelayed(fade, EXIT_FADE_STEP_MS)
+        }
+    }
+
+    private fun restoreStillOwnsSession(): Boolean {
+        val live = service.livePlayer()
+        return live === eternalPlayer || live === exoPlayer
+    }
+
+    private fun awaitExoPlaying(exo: ExoPlayer, timeoutMs: Long, onReady: (Boolean) -> Unit) {
+        val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs
+        val poll = object : Runnable {
+            override fun run() {
+                if (released) {
+                    onReady(false)
+                    return
+                }
+                if (exo.playbackState == Player.STATE_READY && exo.isPlaying) {
+                    onReady(true)
+                    return
+                }
+                if (android.os.SystemClock.elapsedRealtime() >= deadline ||
+                    exo.playerError != null
+                ) {
+                    onReady(false)
+                    return
+                }
+                mainHandler.postDelayed(this, EXIT_PREPARE_POLL_MS)
+            }
+        }
+        mainHandler.post(poll)
     }
 
     private fun onPlaybackError(error: Throwable) {
@@ -628,6 +762,9 @@ class EternalPlaybackController(
     }
 
     private fun teardownEternal() {
+        exitFade?.let { mainHandler.removeCallbacks(it) }
+        exitFade = null
+        restoring = false
         val player = eternalPlayer.also { eternalPlayer = null }
         val output = audioOutput.also { audioOutput = null }
         val engineToClose = engine.also { engine = null }

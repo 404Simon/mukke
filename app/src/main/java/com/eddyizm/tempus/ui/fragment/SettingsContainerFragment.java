@@ -209,6 +209,7 @@ public class SettingsContainerFragment extends PreferenceFragmentCompat {
         actionEqualizerSelector();
         actionParametricEqImport();
         actionReplayGainPreamp();
+        actionCrossfade();
 
         applyAccordionState();
     }
@@ -994,6 +995,50 @@ public class SettingsContainerFragment extends PreferenceFragmentCompat {
 
             return true;
         });
+    }
+
+    private void actionCrossfade() {
+        SwitchPreference enabledPref = findPreference(Preferences.CROSSFADE_ENABLED);
+        SeekBarPreference durationPref = findPreference(Preferences.CROSSFADE_DURATION);
+        if (enabledPref == null || durationPref == null) return;
+
+        // Seed both widgets from the persisted values so the screen opens on the
+        // state playback is actually using.
+        enabledPref.setChecked(Preferences.isCrossfadeEnabled());
+        durationPref.setValue(Preferences.getCrossfadeDurationSeconds());
+        updateCrossfadeDurationSummary(enabledPref.isChecked());
+
+        durationPref.setOnPreferenceChangeListener((preference, newValue) -> {
+            if (!(newValue instanceof Integer)) return true;
+
+            Preferences.setCrossfadeDurationSeconds((Integer) newValue);
+            updateCrossfadeDurationSummary(enabledPref.isChecked());
+            return true;
+        });
+
+        enabledPref.setOnPreferenceChangeListener((preference, newValue) -> {
+            if (newValue instanceof Boolean) {
+                Preferences.setCrossfadeEnabled((Boolean) newValue);
+                // The dependency disables the duration row, so refresh its summary
+                // now instead of leaving a stale overlap claim behind it.
+                updateCrossfadeDurationSummary((Boolean) newValue);
+            }
+            return true;
+        });
+    }
+
+    private void updateCrossfadeDurationSummary(boolean enabled) {
+        SeekBarPreference durationPref = findPreference(Preferences.CROSSFADE_DURATION);
+        if (durationPref == null) return;
+
+        if (!enabled) {
+            durationPref.setSummary(R.string.settings_crossfade_disabled);
+            return;
+        }
+
+        int seconds = Preferences.getCrossfadeDurationSeconds();
+        durationPref.setSummary(getResources().getQuantityString(
+                R.plurals.settings_crossfade_duration_value, seconds, seconds));
     }
 
     private void actionEqualizerSelector() {

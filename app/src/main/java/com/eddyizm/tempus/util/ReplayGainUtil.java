@@ -50,7 +50,11 @@ public class ReplayGainUtil {
     // Audio processor that applies gain directly to PCM samples inside
     // ExoPlayer's audio pipeline.  Unlike player.setVolume() this is
     // sample-accurate across gapless transitions.
-    private static final ReplayGainAudioProcessor audioProcessor =
+    //
+    // Volatile because a crossfade can promote a standby player (and its own
+    // processor) to active on the main thread while prefetch callbacks read
+    // it from a background executor.
+    private static volatile ReplayGainAudioProcessor audioProcessor =
             new ReplayGainAudioProcessor();
 
     private static volatile WeakReference<Player> playerRef = new WeakReference<>(null);
@@ -58,6 +62,34 @@ public class ReplayGainUtil {
 
     public static ReplayGainAudioProcessor getAudioProcessor() {
         return audioProcessor;
+    }
+
+    /**
+     * Creates a fresh processor for a player that is not yet active (e.g. the
+     * standby player used for crossfading).  The caller owns the processor and
+     * can apply gain to it with {@link #applyGainTo} / {@link #setReplayGainTo}.
+     */
+    public static ReplayGainAudioProcessor newProcessor() {
+        return new ReplayGainAudioProcessor();
+    }
+
+    /**
+     * Promotes {@code processor} to be the active singleton and points
+     * {@code playerRef} at its player.  Called on a crossfade boundary when the
+     * standby player becomes the audible one.  The reference swap happens on
+     * the main thread because prefetch callbacks read it there.
+     */
+    public static void setActiveProcessor(ReplayGainAudioProcessor processor, Player player) {
+        if (processor == null) return;
+        audioProcessor = processor;
+        Runnable updateRef = () -> {
+            playerRef = new WeakReference<>(player);
+        };
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            updateRef.run();
+        } else {
+            mainHandler.post(updateRef);
+        }
     }
 
     public static void release() {
@@ -171,7 +203,24 @@ public class ReplayGainUtil {
     }
 
     public static void applyGain(Player player, MediaItem mediaItem) {
-        audioProcessor.clearPendingGain();
+        applyGain(audioProcessor, player, mediaItem, true);
+    }
+
+    /**
+     * Applies the current item's gain to a specific (standby) processor.
+     * Mirrors {@link #applyGain(Player, MediaItem)} but never queues the next
+     * track's pending gain and never touches the active singleton.  Used when
+     * the standby player is prepared for a crossfade; the caller promotes it
+     * with {@link #setActiveProcessor} at the hand-off.
+     */
+    public static void applyGainTo(ReplayGainAudioProcessor processor, Player player) {
+        if (processor == null || player == null) return;
+        applyGain(processor, player, player.getCurrentMediaItem(), false);
+    }
+
+    private static void applyGain(ReplayGainAudioProcessor processor, Player player,
+                                  MediaItem mediaItem, boolean queueNext) {
+        processor.clearPendingGain();
 
         if (mediaItem == null || mediaItem.mediaId == null) {
             Log.d(TAG, "applyGain: null mediaItem or mediaId, skipping");
@@ -195,8 +244,8 @@ public class ReplayGainUtil {
             Log.d(TAG, "applyGain: server RG for " + mediaItem.mediaId
                     + " gain=" + gain + " peak=" + peak
                     + " totalGain=" + totalGain);
-            audioProcessor.setGainImmediate(totalGain);
-            queuePendingForNextTrack(player);
+            processor.setGainImmediate(totalGain);
+            if (queueNext) queuePendingForNextTrack(player);
             return;
         }
 
@@ -210,7 +259,7 @@ public class ReplayGainUtil {
                 Log.d(TAG, "applyGain: tag cache hit for " + mediaItem.mediaId
                         + " gain=" + gain + " peak=" + peak
                         + " totalGain=" + totalGain);
-                audioProcessor.setGainImmediate(totalGain);
+                processor.setGainImmediate(totalGain);
             } else {
                 // Cache entry exists but gain is zero: the track genuinely has
                 // no ReplayGain data. Apply preamp-only so this track plays at the
@@ -218,17 +267,33 @@ public class ReplayGainUtil {
                 float preampOnly = computeTotalGain(0f, 0f);
                 Log.d(TAG, "applyGain: cache hit but gain=0 for " + mediaItem.mediaId
                         + ", applying preamp-only totalGain=" + preampOnly);
-                audioProcessor.setGainImmediate(preampOnly);
+                processor.setGainImmediate(preampOnly);
             }
         } else {
             Log.d(TAG, "applyGain: cache miss for " + mediaItem.mediaId
                     + ", holding current gain until onTracksChanged");
         }
 
-        queuePendingForNextTrack(player);
+        if (queueNext) queuePendingForNextTrack(player);
     }
 
     public static void setReplayGain(Player player, Tracks tracks) {
+        setReplayGain(audioProcessor, player, tracks, true);
+    }
+
+    /**
+     * Tag-based variant of {@link #setReplayGain(Player, Tracks)} that targets a
+     * specific (standby) processor and does not queue the next track's pending
+     * gain or touch the active singleton.
+     */
+    public static void setReplayGainTo(ReplayGainAudioProcessor processor, Player player,
+                                       Tracks tracks) {
+        if (processor == null || player == null) return;
+        setReplayGain(processor, player, tracks, false);
+    }
+
+    private static void setReplayGain(ReplayGainAudioProcessor processor, Player player,
+                                      Tracks tracks, boolean queueNext) {
         if (tracks == null || tracks.getGroups().isEmpty()) return;
 
         MediaItem currentItem = player.getCurrentMediaItem();
@@ -241,7 +306,7 @@ public class ReplayGainUtil {
         if (currentItem != null && extractServerInfo(currentItem) != null) {
             Log.d(TAG, "setReplayGain: server RG already applied for "
                     + currentItem.mediaId + ", ignoring tag-extracted values");
-            queuePendingForNextTrack(player);
+            if (queueNext) queuePendingForNextTrack(player);
             return;
         }
 
@@ -296,15 +361,15 @@ public class ReplayGainUtil {
             float preampOnly = computeTotalGain(0f, 0f);
             Log.d(TAG, "setReplayGain: no effective gain data for " + mediaId
                     + ", applying preamp-only totalGain=" + preampOnly);
-            audioProcessor.setGainImmediate(preampOnly);
-            queuePendingForNextTrack(player);
+            processor.setGainImmediate(preampOnly);
+            if (queueNext) queuePendingForNextTrack(player);
             return;
         }
 
         float peak = resolvePeak(player, gains);
-        audioProcessor.setGainImmediate(computeTotalGain(gain, peak));
+        processor.setGainImmediate(computeTotalGain(gain, peak));
 
-        queuePendingForNextTrack(player);
+        if (queueNext) queuePendingForNextTrack(player);
     }
 
     /**

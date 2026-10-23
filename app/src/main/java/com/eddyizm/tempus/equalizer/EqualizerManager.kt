@@ -7,6 +7,11 @@ class EqualizerManager(
     private var context: Context
 ) {
 
+    /** Rebinds the settings-facing backend without touching the audio session. */
+    fun replaceBackend(newBackend: EqualizerBackend) {
+        backend = newBackend
+    }
+
     fun attach(audioSessionId: Int): Boolean {
         return backend.attach(audioSessionId, context.applicationContext)
     }

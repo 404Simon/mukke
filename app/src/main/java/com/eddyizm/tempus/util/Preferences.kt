@@ -100,6 +100,11 @@ object Preferences {
     private const val NEXT_UPDATE_CHECK = "next_update_check"
     private const val GITHUB_UPDATE_CHECK = "github_update_check"
     private const val CONTINUOUS_PLAY = "continuous_play"
+    const val CROSSFADE_ENABLED = "crossfade_enabled"
+    const val CROSSFADE_DURATION = "crossfade_duration"
+    const val MIN_CROSSFADE_SECONDS = 1
+    const val MAX_CROSSFADE_SECONDS = 12
+    private const val DEFAULT_CROSSFADE_SECONDS = 5
     private const val NUMBER_TRACKS_KEEP_IN_QUEUE = "number_tracks_keep_in_queue"
     private const val FALLBACK_TO_RANDOM_TRACKS = "fallback_to_random_tracks"
     private const val LAST_INSTANT_MIX = "last_instant_mix"
@@ -1000,6 +1005,35 @@ object Preferences {
     @JvmStatic
     fun isContinuousPlayEnabled(): Boolean {
         return App.getInstance().preferences.getBoolean(CONTINUOUS_PLAY, true)
+    }
+
+    @JvmStatic
+    fun isCrossfadeEnabled(): Boolean {
+        return App.getInstance().preferences.getBoolean(CROSSFADE_ENABLED, false)
+    }
+
+    @JvmStatic
+    fun setCrossfadeEnabled(enabled: Boolean) {
+        App.getInstance().preferences.edit().putBoolean(CROSSFADE_ENABLED, enabled).apply()
+    }
+
+    @JvmStatic
+    fun getCrossfadeDurationSeconds(): Int {
+        return App.getInstance().preferences.getInt(CROSSFADE_DURATION, DEFAULT_CROSSFADE_SECONDS)
+            .coerceIn(MIN_CROSSFADE_SECONDS, MAX_CROSSFADE_SECONDS)
+    }
+
+    @JvmStatic
+    fun setCrossfadeDurationSeconds(seconds: Int) {
+        App.getInstance().preferences.edit()
+            .putInt(CROSSFADE_DURATION, seconds.coerceIn(MIN_CROSSFADE_SECONDS, MAX_CROSSFADE_SECONDS))
+            .apply()
+    }
+
+    /** Overlap in milliseconds, or 0 when crossfade is off. */
+    @JvmStatic
+    fun getCrossfadeDurationMs(): Long {
+        return if (isCrossfadeEnabled()) getCrossfadeDurationSeconds() * 1000L else 0L
     }
 
     @JvmStatic

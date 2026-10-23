@@ -201,6 +201,12 @@ open class BaseSessionCallback(
         }
     }
 
+    /** Re-reads the new session player after a player swap (crossfade, Cast, Eternal). */
+    fun refreshNotification() {
+        mainHandler.removeCallbacks(layoutUpdate)
+        mainHandler.post(layoutUpdate)
+    }
+
     @OptIn(UnstableApi::class)
     val mediaNotificationSessionCommands =
         MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()

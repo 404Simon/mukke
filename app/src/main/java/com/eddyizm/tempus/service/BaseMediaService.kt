@@ -6,6 +6,7 @@ import android.app.PendingIntent.FLAG_UPDATE_CURRENT
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -42,6 +43,8 @@ import com.eddyizm.tempus.equalizer.ParametricEqAudioProcessor
 import com.eddyizm.tempus.eternal.EternalPlaybackController
 import androidx.mediarouter.media.MediaRouter
 import com.eddyizm.tempus.repository.QueueRepository
+import com.eddyizm.tempus.service.playback.CrossfadeEngine
+import com.eddyizm.tempus.service.playback.LocalPlayer
 import com.eddyizm.tempus.upnp.UpnpControlPoint
 import com.eddyizm.tempus.upnp.UpnpDevice
 import com.eddyizm.tempus.upnp.UpnpPlayer
@@ -84,7 +87,22 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
     private lateinit var bitmapLoader: SyncBitmapLoader
     private lateinit var networkCallback: CustomNetworkCallback
     private lateinit var equalizerManager: EqualizerManager
-    private val parametricEqProcessor = ParametricEqAudioProcessor()
+    private lateinit var activeLocalPlayer: LocalPlayer
+    private var localPlayerListener: Player.Listener? = null
+    private var crossfadeEngine: CrossfadeEngine? = null
+    private var attachedAudioSessionId = C.AUDIO_SESSION_ID_UNSET
+
+    /** Both local players share one session so the system equalizer survives a role swap. */
+    private val sharedAudioSessionId: Int by lazy {
+        val id = try {
+            getSystemService(AudioManager::class.java)?.generateAudioSessionId()
+                ?: C.AUDIO_SESSION_ID_UNSET
+        } catch (e: Exception) {
+            Log.w(TAG, "could not allocate a shared audio session", e)
+            C.AUDIO_SESSION_ID_UNSET
+        }
+        if (id > 0) id else C.AUDIO_SESSION_ID_UNSET
+    }
     private val widgetUpdateHandler = Handler(Looper.getMainLooper())
     private var widgetUpdateScheduled = false
     // Set in onDestroy. restorePlayerFromQueue maps the saved queue on a background thread and
@@ -130,9 +148,10 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
     open fun playerInitHook() {
         initializeExoPlayer()
         initializeMediaLibrarySession(exoplayer)
-        initializePlayerListener(exoplayer)
+        localPlayerListener = initializePlayerListener(exoplayer)
         initializeSleepTimer()
         setPlayer(null, exoplayer)
+        initializeCrossfade()
     }
 
     open fun getMediaLibrarySessionCallback(): MediaLibrarySession.Callback {
@@ -329,8 +348,8 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
     private var lastPlayerErrorRecoveryMs = 0L
     private val playerErrorRecoveryThrottleMs = 5_000L
 
-    fun initializePlayerListener(player: Player) {
-        player.addListener(object : Player.Listener {
+    fun initializePlayerListener(player: Player): Player.Listener {
+        val listener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 // A network switch (WiFi <-> mobile) surfaces here as a source/network
                 // error. Without recovery the player goes idle and stays silent until the
@@ -666,14 +685,18 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
             }
 
             override fun onAudioSessionIdChanged(audioSessionId: Int) {
+                if (audioSessionId == attachedAudioSessionId) return
                 Log.d(TAG, "onAudioSessionIdChanged")
+                attachedAudioSessionId = audioSessionId
                 equalizerManager.attach(audioSessionId)
                 sendBroadcast(Intent(ACTION_EQUALIZER_UPDATED))
             }
-        })
+        }
+        player.addListener(listener)
         if (player.isPlaying) {
             scheduleWidgetUpdates()
         }
+        return listener
     }
 
     // -------------------------------------------------------------------------
@@ -772,6 +795,8 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
             if (eternalActive) previousSessionPlayer else oldPlayer,
             newPlayer,
         )
+        (sessionCallback as? BaseSessionCallback)?.refreshNotification()
+        crossfadeEngine?.onSessionChanged()
     }
 
     /**
@@ -790,10 +815,23 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
             eternalPlayback.onSessionPlayerReplaced(newPlayer)
         }
         (sessionCallback as? BaseSessionCallback)?.handlePlayerChanged(old, newPlayer)
+        (sessionCallback as? BaseSessionCallback)?.refreshNotification()
+        val keepFocus = ::eternalPlayback.isInitialized &&
+            eternalPlayback.isEternalPlayer(newPlayer)
+        crossfadeEngine?.onSessionChanged(keepFocus)
     }
 
     fun toggleEternal() {
         if (::eternalPlayback.isInitialized) eternalPlayback.toggle()
+    }
+
+    /** Eternal snapshots the live player; keep crossfade work from changing it until the switch. */
+    fun onEternalPreparationStarted() {
+        crossfadeEngine?.onExternalPlaybackStarted()
+    }
+
+    fun onEternalPreparationEnded() {
+        crossfadeEngine?.onExternalPlaybackEnded()
     }
 
     /**
@@ -841,6 +879,14 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
         if (key == Preferences.UPNP_ENABLED) applyUpnpSwitch()
     }
 
+    // Applies crossfade changes immediately, including turning the scheduler off to save work.
+    private val crossfadePreferenceListener =
+        SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == Preferences.CROSSFADE_ENABLED || key == Preferences.CROSSFADE_DURATION) {
+                crossfadeEngine?.onSettingsChanged()
+            }
+        }
+
     private fun applyUpnpSwitch() {
         when (UpnpRoutesGate.change(Preferences.isUpnpEnabled(), upnpRouteProvider != null)) {
             UpnpRoutesGate.Change.REGISTER -> initializeUpnpRoutes()
@@ -870,6 +916,10 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
     }
 
     open fun releasePlayers() {
+        crossfadeEngine?.release()
+        crossfadeEngine = null
+        localPlayerListener?.let { listener -> exoplayer.removeListener(listener) }
+        localPlayerListener = null
         exoplayer.release()
     }
 
@@ -906,6 +956,7 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
         initializeNetworkListener()
         applyUpnpSwitch()
         App.getInstance().preferences.registerOnSharedPreferenceChangeListener(upnpSwitchListener)
+        App.getInstance().preferences.registerOnSharedPreferenceChangeListener(crossfadePreferenceListener)
         restorePlayerFromQueue(mediaLibrarySession.player)
     }
 
@@ -922,7 +973,7 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
         MediaServiceExtensionRegistry.handler = null
         FavoriteRegistry.onChange = null
         releaseNetworkCallback()
-        equalizerManager.release(exoplayer.audioSessionId)
+        equalizerManager.release(attachedAudioSessionId)
         ReplayGainUtil.release()
         stopWidgetUpdates()
         stopRadioHeaderChecks()
@@ -931,9 +982,10 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
         radioHeaderCheckExecutor.shutdown()
         if (::bitmapLoader.isInitialized) bitmapLoader.shutdown()
         App.getInstance().preferences.unregisterOnSharedPreferenceChangeListener(upnpSwitchListener)
+        App.getInstance().preferences.unregisterOnSharedPreferenceChangeListener(crossfadePreferenceListener)
         releaseUpnpRoutes()
-        releasePlayers()
         mediaLibrarySession.release()
+        releasePlayers()
         super.onDestroy()
     }
 
@@ -947,18 +999,114 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
     }
 
     private fun initializeExoPlayer() {
-        exoplayer = ExoPlayer.Builder(this)
-            .setRenderersFactory(getRenderersFactory())
+        activeLocalPlayer = createLocalPlayer()
+        exoplayer = activeLocalPlayer.player
+
+        exoplayer.shuffleModeEnabled = Preferences.isShuffleModeEnabled()
+        exoplayer.repeatMode = Preferences.getRepeatMode()
+        exoplayer.playbackParameters = getPlaybackParameters(Preferences.getPlaybackSpeed())
+        ReplayGainUtil.setActiveProcessor(activeLocalPlayer.replayGain, exoplayer)
+    }
+
+    /**
+     * Builds one of the two interchangeable local players. Focus is handled by CrossfadeEngine,
+     * so both players deliberately leave automatic focus handling off.
+     */
+    private fun createLocalPlayer(): LocalPlayer {
+        val fade = FadeAudioProcessor()
+        val replayGain = ReplayGainUtil.newProcessor()
+        val parametricEq = ParametricEqAudioProcessor()
+
+        val attributes = AudioAttributes.Builder()
+            .setUsage(C.USAGE_MEDIA)
+            .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+            .build()
+
+        val player = ExoPlayer.Builder(this)
+            .setRenderersFactory(getRenderersFactory(arrayOf(replayGain, parametricEq, fade)))
             .setMediaSourceFactory(getMediaSourceFactory())
-            .setAudioAttributes(AudioAttributes.DEFAULT, true)
+            .setAudioAttributes(attributes, false)
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .setLoadControl(initializeLoadControl())
             .build()
 
-        exoplayer.shuffleModeEnabled = Preferences.isShuffleModeEnabled()
-        exoplayer.repeatMode = Preferences.getRepeatMode()
-        exoplayer.playbackParameters = getPlaybackParameters(Preferences.getPlaybackSpeed())
+        if (sharedAudioSessionId != C.AUDIO_SESSION_ID_UNSET) {
+            player.setAudioSessionId(sharedAudioSessionId)
+        }
+        player.volume = 1f
+
+        return LocalPlayer(player, fade, replayGain, parametricEq)
+    }
+
+    private fun initializeCrossfade() {
+        val engine = CrossfadeEngine(
+            context = this,
+            initial = activeLocalPlayer,
+            createPlayer = ::createLocalPlayer,
+            publish = ::onCrossfadePlayerChanged,
+            isSessionPlayer = { mediaLibrarySession.player === it },
+            isSuppressed = { SleepTimerManager.getInstance().isEndOfTrack },
+            onOutgoingFinished = ::onCrossfadeOutgoingFinished,
+        )
+        crossfadeEngine = engine
+        engine.start()
+    }
+
+    private fun onCrossfadePlayerChanged(outgoing: LocalPlayer, incoming: LocalPlayer) {
+        localPlayerListener?.let { outgoing.player.removeListener(it) }
+
+        exoplayer = incoming.player
+        activeLocalPlayer = incoming
+        ReplayGainUtil.setActiveProcessor(incoming.replayGain, incoming.player)
+        incoming.player.currentMediaItem?.let { ReplayGainUtil.applyGain(incoming.player, it) }
+
+        installSessionPlayer(incoming.player)
+        localPlayerListener = initializePlayerListener(incoming.player)
+
+        if (::equalizerManager.isInitialized &&
+            outgoing.player.audioSessionId != incoming.player.audioSessionId
+        ) {
+            equalizerManager.release(attachedAudioSessionId)
+            attachedAudioSessionId = incoming.player.audioSessionId
+            equalizerManager.attach(attachedAudioSessionId)
+        }
+        if (::equalizerManager.isInitialized &&
+            Preferences.getSelectedEqualizer() == 3
+        ) {
+            // Rebind the settings backend to the incoming processor, but do not release the
+            // outgoing one: that processor is still rendering the fading-out track.
+            equalizerManager.replaceBackend(ParametricBackend(incoming.parametricEq))
+            equalizerManager.attach(attachedAudioSessionId)
+        }
+
+        val item = incoming.player.currentMediaItem
+        if (item != null) {
+            MediaManager.setLastPlayedTimestamp(item)
+            MediaManager.scrobble(item, false)
+            item.mediaMetadata.artworkUri?.let { bitmapLoader.prewarm(it) }
+        }
+        ReplayGainUtil.prefetchQueueGains(incoming.player)
+        QueuePreloader.preload(this, incoming.player)
+        updateWidget(incoming.player)
+        if (incoming.player.isPlaying) scheduleWidgetUpdates()
+
+        // The listener was attached after the incoming player had prepared, so seed the one
+        // transition callback that matters for the next track.
+        if (item != null &&
+            incoming.player.nextMediaItemIndex == C.INDEX_UNSET &&
+            item.mediaMetadata.extras?.getString("type") == Constants.MEDIA_TYPE_MUSIC &&
+            Preferences.isContinuousPlayEnabled()
+        ) {
+            MediaManager.continuousPlay(item, this)
+        }
+    }
+
+    private fun onCrossfadeOutgoingFinished(item: MediaItem) {
+        if (item.mediaMetadata.extras?.getString("type") != Constants.MEDIA_TYPE_MUSIC) return
+        MediaManager.scrobble(item, true)
+        MediaManager.saveChronology(item)
+        MediaManager.deleteResumePoint(item)
     }
 
     private fun getPlaybackParameters(speed: Float): PlaybackParameters {
@@ -978,20 +1126,22 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
         when (Preferences.getSelectedEqualizer()) {
             1 -> BuiltinBackend()
             2 -> ExternalBackend()
-            3 -> ParametricBackend(parametricEqProcessor)
+            3 -> ParametricBackend(activeLocalPlayer.parametricEq)
             else -> DefaultBackend()
         }
 
     private fun initializeEqualizer() {
         equalizerManager = EqualizerManager(buildBackend(), baseContext)
-        equalizerManager.attach(exoplayer.audioSessionId)
+        attachedAudioSessionId = activeLocalPlayer.player.audioSessionId
+        equalizerManager.attach(attachedAudioSessionId)
         sendBroadcast(Intent(ACTION_EQUALIZER_UPDATED))
     }
 
     fun reloadEqualizer() {
-        equalizerManager.release(exoplayer.audioSessionId)
+        equalizerManager.release(attachedAudioSessionId)
         equalizerManager = EqualizerManager(buildBackend(), baseContext)
-        equalizerManager.attach(exoplayer.audioSessionId)
+        attachedAudioSessionId = activeLocalPlayer.player.audioSessionId
+        equalizerManager.attach(attachedAudioSessionId)
         sendBroadcast(Intent(ACTION_RELOAD_EQUALIZER))
     }
 
@@ -1011,8 +1161,11 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
 
         bitmapLoader = SyncBitmapLoader(applicationContext)
 
+        val callback = getMediaLibrarySessionCallback()
+        sessionCallback = callback
+
         mediaLibrarySession =
-            MediaLibrarySession.Builder(this, player, getMediaLibrarySessionCallback())
+            MediaLibrarySession.Builder(this, player, callback)
                 .setSessionActivity(sessionActivityPendingIntent)
                 .setPeriodicPositionUpdateEnabled(false)
                 .setBitmapLoader(bitmapLoader)
@@ -1233,7 +1386,7 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
         }
     }
 
-    private fun getRenderersFactory(): DefaultRenderersFactory {
+    private fun getRenderersFactory(processors: Array<AudioProcessor>): DefaultRenderersFactory {
         val extensionRendererMode = if (DownloadUtil.useExtensionRenderers())
             DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
         else
@@ -1250,7 +1403,7 @@ open class BaseMediaService : MediaLibraryService(), MediaManager.QueueTarget {
                 enableAudioTrackPlaybackParams: Boolean
             ): AudioSink {
                 return DefaultAudioSink.Builder(context)
-                    .setAudioProcessors(arrayOf<AudioProcessor>(ReplayGainUtil.getAudioProcessor(), parametricEqProcessor))
+                    .setAudioProcessors(processors)
                     .setEnableFloatOutput(enableFloatOutput)
                     .setEnableAudioOutputPlaybackParameters(enableAudioTrackPlaybackParams)
                     .build()
